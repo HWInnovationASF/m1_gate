@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# m1 — ตัวติดตั้ง/ดูแล pyGate   ใช้: m1 install | update | status | restart | logs | version
+set -Eeuo pipefail
+
+COMMAND="${1:-help}"
+if (($#)); then shift; fi
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SELF_DIR="$(dirname "$SELF")"
+INSTALLER_DIR="${M1_INSTALLER_DIR:-/opt/m1-installer}"
+SERVICE="${SERVICE_NAME:-pygate.service}"
+REPO="${REPO-https://github.com/HWInnovationASF/m1_gate.git}"   # repo สำหรับ m1 update (REPO= เว้นว่าง = ใช้ชุดติดตั้งเดิมในเครื่อง)
+BRANCH="${BRANCH:-main}"
+
+# หา install.sh: โฟลเดอร์ปัจจุบัน > โฟลเดอร์ของ m1 > ที่ติดตั้งไว้แล้ว
+for d in "$PWD" "$SELF_DIR" "$INSTALLER_DIR"; do
+  if [[ -f "$d/install.sh" ]]; then INSTALLER_DIR="$d"; break; fi
+done
+
+as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+run_installer() {
+  [[ -f "$INSTALLER_DIR/install.sh" ]] || { echo "ไม่พบ install.sh ที่ $INSTALLER_DIR" >&2; exit 1; }
+  as_root env SOURCE_DIR="${SOURCE_DIR:-}" INSTALLER_SRC="$INSTALLER_DIR" \
+    YES="${YES:-0}" bash "$INSTALLER_DIR/install.sh" "$@"
+}
+
+update_from_git() {
+    command -v git >/dev/null || { echo "ต้องติดตั้ง git ก่อน" >&2; exit 1; }
+  local work; work="$(mktemp -d /tmp/m1-update.XXXXXX)"
+  trap 'rm -rf -- "$work"' EXIT
+  echo "==> ดาวน์โหลดเวอร์ชันล่าสุด"
+  git clone --depth 1 --branch "$BRANCH" "$REPO" "$work/src"
+  [[ -f "$work/src/installer/install.sh" ]] || { echo "repo ไม่มี installer/install.sh" >&2; exit 1; }
+  as_root env SOURCE_DIR="$work/src" INSTALLER_SRC="$work/src/installer" YES="${YES:-1}" \
+    bash "$work/src/installer/install.sh" "$@"
+}
+
+case "$COMMAND" in
+  install)  run_installer "$@" ;;
+  update)   if [[ -n "$REPO" ]]; then update_from_git "$@"; else YES="${YES:-1}" run_installer "$@"; fi ;;
+  status)   systemctl status "$SERVICE" --no-pager ;;
+  restart)  as_root systemctl restart "$SERVICE"; systemctl is-active "$SERVICE" ;;
+  logs)     journalctl -u "$SERVICE" -n "${1:-100}" --no-pager ;;
+  version)  echo "m1 installer 20261005" ;;
+  help|-h|--help)
+    cat <<'HELP'
+Usage: m1 <command>
+
+  install    ติดตั้ง/อัปเดต library + web server (Apache+PHP+MySQL) + front-end + service
+  update     clone เวอร์ชันล่าสุดจาก GitHub (m1_gate) แล้วติดตั้ง (REPO= เว้นว่างเพื่อใช้ชุดในเครื่อง)
+  status     สถานะ service
+  restart    restart service
+  logs [N]   log ล่าสุด (ค่าเริ่มต้น 100 บรรทัด)
+  version    เวอร์ชันตัวติดตั้ง
+
+ตัวแปร (ส่งผ่าน env):
+  YES=1               ไม่ถามยืนยัน
+  WEB_STACK=lamp|none  lamp (ค่าเริ่มต้น) = Apache+PHP+MySQL/MariaDB, none = ข้าม
+  FRONTEND_SRC=<dir>   โฟลเดอร์ front-end ที่จะลง server (ค่าเริ่มต้น: html/ หรือ frontend/)
+  WEB_DEST=/var/www/html   APP_DEST=/opt/pygate   RUN_USER=<user>
+  PROXY=1             ตั้ง Apache reverse-proxy /pygate -> Flask :8811
+HELP
+    ;;
+  *) echo "ไม่รู้จักคำสั่ง: $COMMAND (ดู: m1 help)" >&2; exit 2 ;;
+esac
